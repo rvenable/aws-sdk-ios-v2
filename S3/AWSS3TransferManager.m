@@ -204,7 +204,7 @@ NSTimeInterval const AWSS3TransferManagerAgeLimitDefault = 0.0; // Keeps the dat
     [completeMultipartUploadRequest az_copyPropertiesFromObject:uploadRequest];
     [completeMultipartUploadRequest setValue:[AZNetworkingRequest new] forKey:@"internalRequest"]; //recreate a new internalRequest
 
-    BFTask *uploadTask = [[[initRequest continueWithSuccessBlock:^id(BFTask *task) {
+    BFTask *uploadTask = [initRequest continueWithSuccessBlock:^id(BFTask *task) {
         AWSS3CreateMultipartUploadOutput *output = task.result;
 
         if (output.uploadId) {
@@ -278,7 +278,7 @@ NSTimeInterval const AWSS3TransferManagerAgeLimitDefault = 0.0; // Keeps the dat
                     }
                 };
 
-                return [[[self.s3 uploadPart:uploadPartRequest] continueWithSuccessBlock:^id(BFTask *task) {
+                BFTask *finalTask = [[[self.s3 uploadPart:uploadPartRequest] continueWithSuccessBlock:^id(BFTask *task) {
                     AWSS3UploadPartOutput *partOuput = task.result;
 
                     AWSS3CompletedPart *completedPart = [AWSS3CompletedPart new];
@@ -303,48 +303,61 @@ NSTimeInterval const AWSS3TransferManagerAgeLimitDefault = 0.0; // Keeps the dat
                     }
                     return nil;
                 }];
+
+				if (i < partCount)
+					return finalTask;
+
+				return [[finalTask continueWithSuccessBlock:^id(BFTask *task) {
+
+					//If all parts upload succeed, send completeMultipartUpload request
+					NSMutableArray *completedParts = [uploadRequest valueForKey:@"completedPartsArray"];
+
+					if (completedParts.count < partCount) {
+						NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Failed to complete upload.", nil)]};
+						return [BFTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain
+																		 code:AWSS3TransferManagerErrorUnknown
+																	 userInfo:userInfo]];
+					}
+
+					if ([completedParts count] != partCount) {
+						NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"All elements of completedParts must be an instance of AWSS3CompletedPart.", nil)]};
+						return [BFTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain
+																		 code:AWSS3TransferManagerErrorUnknown
+																	 userInfo:userInfo]];
+					}
+
+					AWSS3CompletedMultipartUpload *completedMultipartUpload = [AWSS3CompletedMultipartUpload new];
+					completedMultipartUpload.parts = completedParts;
+					completeMultipartUploadRequest.multipartUpload = completedMultipartUpload;
+
+					return [self.s3 completeMultipartUpload:completeMultipartUploadRequest];
+				}] continueWithBlock:^id(BFTask *task) {
+
+					//delete cached Object if state is not Paused
+					if (uploadRequest.state != AWSS3TransferManagerRequestStatePaused) {
+						[self.cache removeObjectForKey:cacheKey];
+					}
+
+					if (uploadRequest.state == AWSS3TransferManagerRequestStateCanceling) {
+						[self abortMultipartUploadsForRequest:uploadRequest];
+					}
+
+					if (task.error) {
+						return [BFTask taskWithError:task.error];
+					}
+
+					AWSS3TransferManagerUploadOutput *uploadOutput = [AWSS3TransferManagerUploadOutput new];
+					if (task.result) {
+						AWSS3CompleteMultipartUploadOutput *completeMultipartUploadOutput = task.result;
+						[uploadOutput az_copyPropertiesFromObject:completeMultipartUploadOutput];
+					}
+
+					return uploadOutput;
+				}];
             }];
         }
 
         return uploadPartsTask;
-    }] continueWithSuccessBlock:^id(BFTask *task) {
-        
-        //If all parts upload succeed, send completeMultipartUpload request
-        NSMutableArray *completedParts = [uploadRequest valueForKey:@"completedPartsArray"];
-        if ([completedParts count] != partCount) {
-            NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"All elements of completedParts must be an instance of AWSS3CompletedPart.", nil)]};
-            return [BFTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain
-                                                             code:AWSS3TransferManagerErrorUnknown
-                                                         userInfo:userInfo]];
-        }
-
-        AWSS3CompletedMultipartUpload *completedMultipartUpload = [AWSS3CompletedMultipartUpload new];
-        completedMultipartUpload.parts = completedParts;
-        completeMultipartUploadRequest.multipartUpload = completedMultipartUpload;
-
-        return [self.s3 completeMultipartUpload:completeMultipartUploadRequest];
-    }] continueWithBlock:^id(BFTask *task) {
-        
-        //delete cached Object if state is not Paused
-        if (uploadRequest.state != AWSS3TransferManagerRequestStatePaused) {
-            [self.cache removeObjectForKey:cacheKey];
-        }
-        
-        if (uploadRequest.state == AWSS3TransferManagerRequestStateCanceling) {
-            [self abortMultipartUploadsForRequest:uploadRequest];
-        }
-        
-        if (task.error) {
-            return [BFTask taskWithError:task.error];
-        }
-
-        AWSS3TransferManagerUploadOutput *uploadOutput = [AWSS3TransferManagerUploadOutput new];
-        if (task.result) {
-            AWSS3CompleteMultipartUploadOutput *completeMultipartUploadOutput = task.result;
-            [uploadOutput az_copyPropertiesFromObject:completeMultipartUploadOutput];
-        }
-
-        return uploadOutput;
     }];
 
     return uploadTask;
